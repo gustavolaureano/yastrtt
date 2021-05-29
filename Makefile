@@ -1,11 +1,19 @@
+
+SOURCEDIR = src
+BUILDDIR = build
+EXECUTABLE = yastrtt
+
+SOURCES = $(wildcard $(SOURCEDIR)/*.c)
+OBJECTS = $(patsubst $(SOURCEDIR)/%.c,$(BUILDDIR)/%.o,$(SOURCES))
+
+
 ifeq ($(OS),Windows_NT)
-TARGET = yastrtt.exe
+EXECUTABLE += .exe
 CC = i686-w64-mingw32-gcc
 LINKER = i686-w64-mingw32-g++
 RM=del
 LD_LIB  = ./lib/win_32
 else
-TARGET = yastrtt
 CC = gcc
 LINKER = g++
 RM=rm
@@ -20,12 +28,16 @@ C_FLAG = -I. -I./inc -I./inc/stlink -I./inc/stlink/stlink-lib -I./inc -I./inc/li
 L_FLAG = $(LD_LIB)/libstlink.a
 
 
-$(TARGET):yastrtt.o
-	$(LINKER) $^ $(L_FLAG) -o $(TARGET)
+all: dir $(BUILDDIR)/$(EXECUTABLE)
 
-yastrtt.o:./src/yastrtt.c
-	$(CC) $^ $(C_FLAG)
+dir:
+	mkdir -p $(BUILDDIR)
+
+$(BUILDDIR)/$(EXECUTABLE): $(OBJECTS)
+	$(LINKER) $^ $(L_FLAG) -o $@
+
+$(OBJECTS): $(BUILDDIR)/%.o : $(SOURCEDIR)/%.c
+	$(CC) $(C_FLAG) $< -o $@
 
 clean:
-	$(RM) -f *.o
-	$(RM) -f $(TARGET)
+	rm -f $(BUILDDIR)/*o $(BUILDDIR)/$(EXECUTABLE)
