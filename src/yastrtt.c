@@ -35,6 +35,40 @@ typedef struct
 stlink_t *sl = NULL;
 rtt_cb *rtt_cb_ptr = NULL;
 
+int leave_signal = 0;
+
+const char anim[4] = {'|','/','-','\\'};
+int animi = 0;
+
+int close_device(void)
+{
+    if (sl)
+    {
+        stlink_exit_debug_mode(sl);
+        stlink_close(sl);
+        sl = NULL;
+    }
+}
+
+void exit_clean(int extcode)
+{
+    close_device();
+    if (rtt_cb_ptr != NULL)
+    {
+        if (rtt_cb_ptr->aUp != NULL)
+        {
+            free(rtt_cb_ptr->aUp);
+        }
+        if (rtt_cb_ptr->aDown != NULL)
+        {
+            free(rtt_cb_ptr->aDown);
+        }
+        free(rtt_cb_ptr);
+    }
+
+    exit(extcode);
+}
+
 int read_mem(uint8_t *des, uint32_t addr, uint32_t len)
 {
     uint32_t offset_addr = 0, offset_len, read_len;
@@ -51,6 +85,13 @@ int read_mem(uint8_t *des, uint32_t addr, uint32_t len)
     if (offset_len > 0)
         read_len += (4 - offset_len);
 
+    // if ((stlink_status(sl) != 0) ||
+    //     (sl->core_stat != TARGET_RUNNING) ||
+    //     (stlink_read_mem32(sl, addr, read_len) != 0))
+    // {
+    //     printf("Error reading RAM!\n");
+    //     exit_clean(-1);
+    // }
     stlink_read_mem32(sl, addr, read_len);
 
     // read data we actually need
@@ -139,70 +180,43 @@ static stlink_t *stlink_open_first(void)
 void handle_sigint(int sig)
 {
     printf("Caught signal %d\n", sig);
-    if (sl)
-    {
-        stlink_exit_debug_mode(sl);
-        stlink_close(sl);
-    }
-    if (rtt_cb_ptr != NULL)
-    {
-        if (rtt_cb_ptr->aUp != NULL)
-        {
-            free(rtt_cb_ptr->aUp);
-        }
-        if (rtt_cb_ptr->aDown != NULL)
-        {
-            free(rtt_cb_ptr->aDown);
-        }
-        free(rtt_cb_ptr);
-    }
-
-    exit(0);
+    leave_signal = 1;
 }
 
-int main(int ac, char **av)
+int open_device(void)
 {
-    signal(SIGINT, handle_sigint);
-    printf("Test\n");
-
     sl = stlink_open_first();
 
     if (sl == NULL)
     {
-        printf("fail to open stlink");
+        printf("STLink not detected %c     \r",anim[animi]);
+        fflush(stdout);
         return -1;
     }
 
-    sl->verbose = 1;
+    sl->verbose = 0;
 
-    if (stlink_current_mode(sl) == STLINK_DEV_DFU_MODE)
-    {
-        if (stlink_exit_dfu_mode(sl))
-        {
-            printf("Failed to exit DFU mode");
-            return -1;
-        }
-    }
+    if (stlink_current_mode(sl) == STLINK_DEV_DFU_MODE) { stlink_exit_dfu_mode(sl); }
 
-    if (stlink_current_mode(sl) != STLINK_DEV_DEBUG_MODE)
-    {
-        if (stlink_enter_swd_mode(sl))
-        {
-            printf("Failed to enter SWD mode");
-            return -1;
-        }
-    }
+    if (stlink_current_mode(sl) != STLINK_DEV_DEBUG_MODE) { stlink_enter_swd_mode(sl); }
 
     if (sl->sram_size == 0)
     {
-        printf("target have 0k RAM!");
+        printf("Target not detected %c      \r", anim[animi]);
+        fflush(stdout);
         return -1;
     }
 
+    stlink_run(sl, RUN_NORMAL);
+    return 0;
+}
+
+int locate_rtt(void)
+{
     // read the whole RAM
     uint8_t *buf = (uint8_t *)malloc(sl->sram_size);
     uint32_t r_cnt = sl->sram_size / 0x400;
-    printf("target have %u k ram\n\r", r_cnt);
+    //printf("target have %u k ram\n\r", r_cnt);
     for (uint32_t i = 0; i < r_cnt; i++)
     {
         stlink_read_mem32(sl, 0x20000000 + i * 0x400, 0x400);
@@ -220,14 +234,14 @@ int main(int ac, char **av)
         if (strncmp((char *)&buf[offset], "SEGGER RTT", 16) == 0)
         {
             rtt_cb_ptr->cb_addr = 0x20000000 + offset;
-            printf("addr = 0x%x\n\r", rtt_cb_ptr->cb_addr);
+            printf("RTT addr = 0x%x\n\r", rtt_cb_ptr->cb_addr);
             break;
         }
     }
 
     if (rtt_cb_ptr->cb_addr == 0)
     {
-        printf("NO SEGGER_RTT_CB found!");
+        printf("NO SEGGER_RTT_CB found!\n");
         free(buf);
         return -1;
     }
@@ -244,17 +258,41 @@ int main(int ac, char **av)
            rtt_cb_ptr->MaxNumDownBuffers * sizeof(rtt_channel));
 
     free(buf);
-    stlink_run(sl, RUN_NORMAL);
+
+    return 0;
+}
+
+int main(int ac, char **av)
+{
+    signal(SIGINT, handle_sigint);
 
     while (1)
     {
-        static int test = 0;
+        if (leave_signal) exit_clean(0);
 
-        //printf("%d\r", test++);
-        cb_timer();
-        fflush(stdout);
+        if ((open_device() == 0) &&
+            (locate_rtt() == 0))
+        {
+            close_device();
 
-        usleep(100000);
+            while (1)
+            {
+                if (leave_signal) exit_clean(0);
+
+                if (open_device() != 0) break;
+                cb_timer();
+                fflush(stdout);
+                close_device();
+
+                usleep(100000);
+                animi = (animi+1)%4;
+            }
+        }
+
+        close_device();
+
+        usleep(500000);
+        animi = (animi+1)%4;
     }
 
     return 0;
