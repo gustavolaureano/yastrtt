@@ -37,7 +37,7 @@ rtt_cb *rtt_cb_ptr = NULL;
 
 int leave_signal = 0;
 
-const char anim[4] = {'|','/','-','\\'};
+const char anim[4] = {'|', '/', '-', '\\'};
 int animi = 0;
 
 int close_device(void)
@@ -189,16 +189,22 @@ int open_device(void)
 
     if (sl == NULL)
     {
-        printf("STLink not detected %c     \r",anim[animi]);
+        printf("STLink not detected %c     \r", anim[animi]);
         fflush(stdout);
         return -1;
     }
 
     sl->verbose = 0;
 
-    if (stlink_current_mode(sl) == STLINK_DEV_DFU_MODE) { stlink_exit_dfu_mode(sl); }
+    if (stlink_current_mode(sl) == STLINK_DEV_DFU_MODE)
+    {
+        stlink_exit_dfu_mode(sl);
+    }
 
-    if (stlink_current_mode(sl) != STLINK_DEV_DEBUG_MODE) { stlink_enter_swd_mode(sl); }
+    if (stlink_current_mode(sl) != STLINK_DEV_DEBUG_MODE)
+    {
+        stlink_enter_swd_mode(sl);
+    }
 
     if (sl->sram_size == 0)
     {
@@ -234,7 +240,7 @@ int locate_rtt(void)
         if (strncmp((char *)&buf[offset], "SEGGER RTT", 16) == 0)
         {
             rtt_cb_ptr->cb_addr = 0x20000000 + offset;
-            printf("RTT addr = 0x%x\n\r", rtt_cb_ptr->cb_addr);
+            printf("=> RTT addr = 0x%x\n\r", rtt_cb_ptr->cb_addr);
             break;
         }
     }
@@ -262,6 +268,8 @@ int locate_rtt(void)
     return 0;
 }
 
+int RTT_located = 0;
+
 int main(int ac, char **av)
 {
     signal(SIGINT, handle_sigint);
@@ -270,29 +278,31 @@ int main(int ac, char **av)
     {
         if (leave_signal) exit_clean(0);
 
-        if ((open_device() == 0) &&
-            (locate_rtt() == 0))
+        if (open_device() == 0)
         {
-            close_device();
-
-            while (1)
+            if (RTT_located == 0)
             {
-                if (leave_signal) exit_clean(0);
+                printf("\r\n");
+                if ((locate_rtt() == 0))
+                {
+                    RTT_located = 1;
+                }
+            }
 
-                if (open_device() != 0) break;
+            if (RTT_located == 1)
+            {
                 cb_timer();
                 fflush(stdout);
-                close_device();
-
-                usleep(100000);
-                animi = (animi+1)%4;
             }
+        }
+        else
+        {
+            RTT_located = 0;
         }
 
         close_device();
-
-        usleep(500000);
-        animi = (animi+1)%4;
+        usleep(100000);
+        animi = (animi + 1) % 4;
     }
 
     return 0;
