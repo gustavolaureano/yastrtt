@@ -30,15 +30,15 @@ typedef struct
     int32_t cb_addr;
     rtt_channel *aUp;   // Up buffers, transferring information up from target via debug probe to host
     rtt_channel *aDown; // Down buffers, transferring information down from host via debug probe to target
-} rtt_cb;
+} rtt_cb_t;
 
 stlink_t *sl = NULL;
-rtt_cb *rtt_cb_ptr = NULL;
+rtt_cb_t rtt_cb = {0};
 
-int leave_signal = 0;
+int capt_signal = 0;
 
 const char anim[4] = {'|', '/', '-', '\\'};
-int animi = 0;
+int anim_index = 0;
 
 int close_device(void)
 {
@@ -48,25 +48,6 @@ int close_device(void)
         stlink_close(sl);
         sl = NULL;
     }
-}
-
-void exit_clean(int extcode)
-{
-    close_device();
-    if (rtt_cb_ptr != NULL)
-    {
-        if (rtt_cb_ptr->aUp != NULL)
-        {
-            free(rtt_cb_ptr->aUp);
-        }
-        if (rtt_cb_ptr->aDown != NULL)
-        {
-            free(rtt_cb_ptr->aDown);
-        }
-        free(rtt_cb_ptr);
-    }
-
-    exit(extcode);
 }
 
 int read_mem(uint8_t *des, uint32_t addr, uint32_t len)
@@ -92,6 +73,9 @@ int read_mem(uint8_t *des, uint32_t addr, uint32_t len)
     //     printf("Error reading RAM!\n");
     //     exit_clean(-1);
     // }
+    /* No way of detecting if the target is still there, no error is returned, 
+     * the only way is to detect during connect, that's why we disconnect and 
+     * reconnect at every cycle */
     stlink_read_mem32(sl, addr, read_len);
 
     // read data we actually need
@@ -138,26 +122,27 @@ int get_channel_data(uint8_t *buf, rtt_channel *rtt_c, uint32_t rtt_channel_addr
     }
 }
 
-int cb_timer()
+int Collect_RX()
 {
     uint8_t buf[1024];
     char str_buf[1024];
     int line_cnt;
 
     // update SEGGER_RTT_CB content
-    read_mem(buf, rtt_cb_ptr->cb_addr + 24, rtt_cb_ptr->cb_size - 24);
-    for (uint32_t j = 0; j < rtt_cb_ptr->MaxNumUpBuffers * sizeof(rtt_channel); j++)
-        ((uint8_t *)rtt_cb_ptr->aUp)[j] = buf[j];
-    for (uint32_t j = 0; j < rtt_cb_ptr->MaxNumDownBuffers * sizeof(rtt_channel); j++)
-        ((uint8_t *)rtt_cb_ptr->aDown)[j] = buf[rtt_cb_ptr->MaxNumUpBuffers * sizeof(rtt_channel) + j];
+    read_mem(buf, rtt_cb.cb_addr + 24, rtt_cb.cb_size - 24);
+    for (uint32_t j = 0; j < rtt_cb.MaxNumUpBuffers * sizeof(rtt_channel); j++)
+        ((uint8_t *)rtt_cb.aUp)[j] = buf[j];
+    for (uint32_t j = 0; j < rtt_cb.MaxNumDownBuffers * sizeof(rtt_channel); j++)
+        ((uint8_t *)rtt_cb.aDown)[j] = buf[rtt_cb.MaxNumUpBuffers * sizeof(rtt_channel) + j];
 
     memset(buf, '\0', 1024);
-    if (get_channel_data(buf, &rtt_cb_ptr->aUp[0], rtt_cb_ptr->cb_addr + 24) > 0)
+    if (get_channel_data(buf, &rtt_cb.aUp[0], rtt_cb.cb_addr + 24) > 0)
     {
         if (strlen(buf) > 0)
         {
             strcpy(str_buf, buf);
             printf("%s", str_buf);
+            fflush(stdout);
             // IupSetAttribute(txt_message, "APPEND", str_buf);
             // line_cnt = IupGetInt(txt_message, "LINECOUNT");
             // IupSetStrf(txt_message, "SCROLLTO", "%d:1", line_cnt);
@@ -180,7 +165,7 @@ static stlink_t *stlink_open_first(void)
 void handle_sigint(int sig)
 {
     printf("Caught signal %d\n", sig);
-    leave_signal = 1;
+    capt_signal = sig;
 }
 
 int open_device(void)
@@ -189,7 +174,7 @@ int open_device(void)
 
     if (sl == NULL)
     {
-        printf("STLink not detected %c     \r", anim[animi]);
+        printf("STLink not detected %c     \r", anim[anim_index]);
         fflush(stdout);
         return -1;
     }
@@ -206,18 +191,22 @@ int open_device(void)
         stlink_enter_swd_mode(sl);
     }
 
+    /* That's how we know the STLINK lib has not detected a target */
     if (sl->sram_size == 0)
     {
-        printf("Target not detected %c      \r", anim[animi]);
+        printf("Target not detected %c      \r", anim[anim_index]);
         fflush(stdout);
         return -1;
     }
 
+    /* The target is not reset/stopped at any moment 
+     * (checked with a logic analyzer on a Nucleo G071 board) */
+    /* but we set it to run anyway */
     stlink_run(sl, RUN_NORMAL);
     return 0;
 }
 
-int locate_rtt(void)
+void locate_rtt_cb(void)
 {
     // read the whole RAM
     uint8_t *buf = (uint8_t *)malloc(sl->sram_size);
@@ -230,8 +219,12 @@ int locate_rtt(void)
             (buf + i * 0x400)[k] = (uint8_t)(sl->q_buf[k]);
     }
 
-    rtt_cb_ptr = (rtt_cb *)malloc(sizeof(rtt_cb));
-    rtt_cb_ptr->cb_addr = 0;
+    /* Reset the Control Block */
+    rtt_cb.cb_addr = 0;
+    free(rtt_cb.aUp); /* freeing NULL is allowed */
+    rtt_cb.aUp = NULL;
+    free(rtt_cb.aDown);
+    rtt_cb.aDown = NULL;
 
     // find SEGGER_RTT_CB address
     uint32_t offset;
@@ -239,36 +232,34 @@ int locate_rtt(void)
     {
         if (strncmp((char *)&buf[offset], "SEGGER RTT", 16) == 0)
         {
-            rtt_cb_ptr->cb_addr = 0x20000000 + offset;
-            printf("=> RTT addr = 0x%x\n\r", rtt_cb_ptr->cb_addr);
+            rtt_cb.cb_addr = 0x20000000 + offset;
+            printf("=> RTT addr = 0x%x         \n\r", rtt_cb.cb_addr);
+            fflush(stdout);
             break;
         }
     }
 
-    if (rtt_cb_ptr->cb_addr == 0)
+    if (rtt_cb.cb_addr == 0)
     {
-        printf("NO SEGGER_RTT_CB found!\n");
-        free(buf);
-        return -1;
+        printf("Searching SEGGER_RTT_CB %c        \r", anim[anim_index]);
+        fflush(stdout);
+    }
+    else
+    {
+        // get SEGGER_RTT_CB content
+        memcpy(rtt_cb.acID, ((rtt_cb_t *)(buf + offset))->acID, 16);
+        rtt_cb.MaxNumUpBuffers = ((rtt_cb_t *)(buf + offset))->MaxNumUpBuffers;
+        rtt_cb.MaxNumDownBuffers = ((rtt_cb_t *)(buf + offset))->MaxNumDownBuffers;
+        rtt_cb.cb_size = 24 + (rtt_cb.MaxNumUpBuffers + rtt_cb.MaxNumDownBuffers) * sizeof(rtt_cb);
+        rtt_cb.aUp = (rtt_channel *)malloc(rtt_cb.MaxNumUpBuffers * sizeof(rtt_channel));
+        rtt_cb.aDown = (rtt_channel *)malloc(rtt_cb.MaxNumDownBuffers * sizeof(rtt_channel));
+        memcpy(rtt_cb.aUp, buf + offset + 24, rtt_cb.MaxNumUpBuffers * sizeof(rtt_channel));
+        memcpy(rtt_cb.aDown, buf + offset + 24 + rtt_cb.MaxNumUpBuffers * sizeof(rtt_channel),
+               rtt_cb.MaxNumDownBuffers * sizeof(rtt_channel));
     }
 
-    // get SEGGER_RTT_CB content
-    memcpy(rtt_cb_ptr->acID, ((rtt_cb *)(buf + offset))->acID, 16);
-    rtt_cb_ptr->MaxNumUpBuffers = ((rtt_cb *)(buf + offset))->MaxNumUpBuffers;
-    rtt_cb_ptr->MaxNumDownBuffers = ((rtt_cb *)(buf + offset))->MaxNumDownBuffers;
-    rtt_cb_ptr->cb_size = 24 + (rtt_cb_ptr->MaxNumUpBuffers + rtt_cb_ptr->MaxNumDownBuffers) * sizeof(rtt_cb);
-    rtt_cb_ptr->aUp = (rtt_channel *)malloc(rtt_cb_ptr->MaxNumUpBuffers * sizeof(rtt_channel));
-    rtt_cb_ptr->aDown = (rtt_channel *)malloc(rtt_cb_ptr->MaxNumDownBuffers * sizeof(rtt_channel));
-    memcpy(rtt_cb_ptr->aUp, buf + offset + 24, rtt_cb_ptr->MaxNumUpBuffers * sizeof(rtt_channel));
-    memcpy(rtt_cb_ptr->aDown, buf + offset + 24 + rtt_cb_ptr->MaxNumUpBuffers * sizeof(rtt_channel),
-           rtt_cb_ptr->MaxNumDownBuffers * sizeof(rtt_channel));
-
     free(buf);
-
-    return 0;
 }
-
-int RTT_located = 0;
 
 int main(int ac, char **av)
 {
@@ -276,33 +267,39 @@ int main(int ac, char **av)
 
     while (1)
     {
-        if (leave_signal) exit_clean(0);
+        if (capt_signal == SIGINT)
+        {
+            close_device();
+
+            free(rtt_cb.aUp); /* freeing NULL is allowed */
+            rtt_cb.aUp = NULL;
+            free(rtt_cb.aDown);
+            rtt_cb.aDown = NULL;
+
+            break;
+        }
 
         if (open_device() == 0)
         {
-            if (RTT_located == 0)
+            if (rtt_cb.cb_addr == 0)
             {
-                printf("\r\n");
-                if ((locate_rtt() == 0))
-                {
-                    RTT_located = 1;
-                }
+                locate_rtt_cb();
             }
 
-            if (RTT_located == 1)
+            if (rtt_cb.cb_addr != 0)
             {
-                cb_timer();
-                fflush(stdout);
+                Collect_RX();
             }
         }
         else
         {
-            RTT_located = 0;
+            /* We also need to relocate the CB when we lost connection to the target */
+            rtt_cb.cb_addr = 0;
         }
 
         close_device();
         usleep(100000);
-        animi = (animi + 1) % 4;
+        anim_index = (anim_index + 1) % sizeof(anim);
     }
 
     return 0;
